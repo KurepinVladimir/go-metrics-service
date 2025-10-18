@@ -15,6 +15,8 @@ var flagFileStoragePath string
 var flagRestore bool
 var flagDatabaseDSN string
 var flagKey string
+var flagAuditFile string
+var flagAuditURL string
 
 type Config struct {
 	RunAddr         string `env:"ADDRESS"`
@@ -23,6 +25,8 @@ type Config struct {
 	Restore         bool   `env:"RESTORE"`
 	DatabaseDSN     string `env:"DATABASE_DSN"`
 	Key             string `env:"KEY"`
+	AuditFile       string `env:"AUDIT_FILE"`
+	AuditURL        string `env:"AUDIT_URL"`
 }
 
 // parseFlags обрабатывает аргументы командной строки
@@ -34,6 +38,8 @@ func parseFlags() {
 	flag.BoolVar(&flagRestore, "r", false, "restore from file storage")
 	flag.StringVar(&flagDatabaseDSN, "d", "", "database DSN for persistent storage") // postgres://admin:admin@localhost:5432/videos
 	flag.StringVar(&flagKey, "k", "", "Key")
+	flag.StringVar(&flagAuditFile, "audit-file", "", "path to audit log file")
+	flag.StringVar(&flagAuditURL, "audit-url", "", "URL of remote audit log server")
 
 	// парсим переданные серверу аргументы в зарегистрированные переменные
 	flag.Parse()
@@ -75,6 +81,14 @@ func parseFlags() {
 
 	if envKey := cfg.Key; envKey != "" {
 		flagKey = envKey
+	}
+
+	if cfg.AuditFile != "" {
+		flagAuditFile = cfg.AuditFile
+	}
+
+	if cfg.AuditURL != "" {
+		flagAuditURL = cfg.AuditURL
 	}
 
 }
