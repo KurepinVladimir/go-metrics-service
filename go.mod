@@ -1,4 +1,4 @@
-module github.com/KurepinVladimir/go-metrics-service
+module github.com/KurepinVladimir/go-musthave-metrics-tpl.git //module github.com/KurepinVladimir/go-metrics-service
 
 go 1.24.3
 

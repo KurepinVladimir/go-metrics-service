@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/audit"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/models"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/repository"
 )
 
-func UpdatesHandler(storage repository.Storage, key string) http.HandlerFunc {
+func UpdatesHandler(storage repository.Storage, key string, aud *audit.Auditor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
@@ -60,10 +62,18 @@ func UpdatesHandler(storage repository.Storage, key string) http.HandlerFunc {
 			}
 		}
 
-		// w.Header().Set("Content-Type", "application/json")
-		// w.WriteHeader(http.StatusOK)
-		// _, _ = w.Write([]byte(`{"status":"ok"}`))
+		// собираем имена метрик ИЗ batch
+		names := make([]string, 0, len(batch))
+		for _, m := range batch {
+			names = append(names, m.ID)
+		}
 
-		_ = WriteSignedJSONResponse(w, []byte(`{"status":"ok"}`), key)
+		// аудит после успеха
+		if aud != nil && aud.Enabled() {
+			aud.Notify(r.Context(), names, ClientIP(r), time.Now)
+		}
+
+		//_ = WriteSignedJSONResponse(w, []byte(`{"status":"ok"}`), key)
+		_ = WriteSignedJSONResponse(w, map[string]string{"status": "ok"}, key)
 	}
 }
