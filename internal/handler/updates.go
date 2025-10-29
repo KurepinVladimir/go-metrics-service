@@ -11,6 +11,37 @@ import (
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/repository"
 )
 
+// UpdatesHandler возвращает http.HandlerFunc для обработки пакетного обновления метрик
+// по маршруту вида POST /updates (тело — JSON-массив моделей models.Metrics).
+//
+// Правила и поведение:
+//   - Ожидается заголовок Content-Type: application/json; тело ограничено 10 МБ.
+//   - Тело запроса — массив метрик (gauge/counter). Для gauge требуется поле Value,
+//     для counter — поле Delta. Пустые (nil) значения отвергаются как 400 Bad Request.
+//   - Если хранилище реализует интерфейс repository.BatchUpdater, все изменения
+//     применяются атомарно через UpdateBatch. В противном случае метрики обновляются
+//     поштучно через методы Storage.
+//   - После успешного обновления, при наличии аудитора aud и если он включён,
+//     выполняется аудит: фиксируются идентификаторы обновлённых метрик, IP клиента
+//     (см. ClientIP) и текущее время.
+//   - Ответ: JSON {"status":"ok"} со статусом 200. Если key не пустой, ответ
+//     подписывается (например, в заголовок HashSHA256 пишется HMAC от тела)
+//     внутри WriteSignedJSONResponse.
+//
+// Параметры:
+//   - storage — хранилище метрик (потокобезопасное), реализующее repository.Storage
+//     и, опционально, repository.BatchUpdater.
+//   - key — ключ подписи ответа (если пустой, подпись не добавляется).
+//   - aud — опциональный аудитор событий обновления; может быть nil.
+//
+// Пример запроса:
+//
+//	POST /updates
+//	Content-Type: application/json
+//	[
+//	  {"id":"g1","type":"gauge","value":1.23},
+//	  {"id":"c1","type":"counter","delta":5}
+//	]
 func UpdatesHandler(storage repository.Storage, key string, aud *audit.Auditor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
