@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/audit"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/handler"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/middleware"
@@ -21,7 +22,7 @@ import (
 )
 
 // handler обрабатывает POST-запросы на /update/{type}/{name}/{value}
-func updateHandler(storage repository.Storage) http.HandlerFunc {
+func updateHandler(storage repository.Storage, aud *audit.Auditor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		metricType := chi.URLParam(r, "type")
@@ -42,6 +43,10 @@ func updateHandler(storage repository.Storage) http.HandlerFunc {
 			}
 			storage.UpdateGauge(r.Context(), name, value)
 
+			if aud != nil && aud.Enabled() {
+				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r), time.Now)
+			}
+
 		case "counter":
 			value, err := strconv.ParseInt(valueStr, 10, 64)
 			if err != nil {
@@ -49,6 +54,10 @@ func updateHandler(storage repository.Storage) http.HandlerFunc {
 				return
 			}
 			storage.UpdateCounter(r.Context(), name, value)
+
+			if aud != nil && aud.Enabled() {
+				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r), time.Now)
+			}
 
 		default:
 			http.Error(w, "Invalid metric type", http.StatusBadRequest)
@@ -60,7 +69,7 @@ func updateHandler(storage repository.Storage) http.HandlerFunc {
 	}
 }
 
-func updateHandlerJSON(storage repository.Storage) http.HandlerFunc {
+func updateHandlerJSON(storage repository.Storage, aud *audit.Auditor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		// десериализуем запрос в структуру модели
@@ -80,12 +89,20 @@ func updateHandlerJSON(storage repository.Storage) http.HandlerFunc {
 				return
 			}
 			storage.UpdateGauge(r.Context(), m.ID, *m.Value)
+			if aud != nil && aud.Enabled() {
+				ip := handler.ClientIP(r)
+				aud.Notify(r.Context(), []string{m.ID}, ip, time.Now)
+			}
 		case "counter":
 			if m.Delta == nil {
 				http.Error(w, "missing counter delta", http.StatusBadRequest)
 				return
 			}
 			storage.UpdateCounter(r.Context(), m.ID, *m.Delta)
+			if aud != nil && aud.Enabled() {
+				ip := handler.ClientIP(r)
+				aud.Notify(r.Context(), []string{m.ID}, ip, time.Now)
+			}
 		default:
 			http.Error(w, "unknown metric type", http.StatusNotImplemented)
 			return
@@ -250,6 +267,16 @@ func run() error {
 		storage = repository.NewMemStorage()
 	}
 
+	// --- Инициализация аудитора (Observer sinks) ---
+	var sinks []audit.Sink
+	if flagAuditFile != "" {
+		sinks = append(sinks, audit.NewFileSink(flagAuditFile))
+	}
+	if flagAuditURL != "" {
+		sinks = append(sinks, audit.NewHTTPSink(flagAuditURL))
+	}
+	aud := audit.New(sinks...)
+
 	// загружаем метрики из файла, если включено
 	if memStorage, ok := storage.(*repository.MemStorage); ok && flagRestore && flagFileStoragePath != "" {
 		if err := memStorage.LoadFromFile(flagFileStoragePath); err != nil {
@@ -270,15 +297,15 @@ func run() error {
 	r.Use(gzipRequestMiddleware)
 	r.Use(gzipResponseMiddleware)
 
-	r.Post("/update/{type}/{name}/{value}", updateHandler(storage)) // Регистрируем маршрут с параметрами
+	r.Post("/update/{type}/{name}/{value}", updateHandler(storage, aud)) // Регистрируем маршрут с параметрами
 
 	hashMiddleware := middleware.ValidateHashSHA256(flagKey)
 
-	r.With(hashMiddleware).Post("/update", updateHandlerJSON(storage))
-	r.With(hashMiddleware).Post("/update/", updateHandlerJSON(storage))
+	r.With(hashMiddleware).Post("/update", updateHandlerJSON(storage, aud))
+	r.With(hashMiddleware).Post("/update/", updateHandlerJSON(storage, aud))
 
-	r.With(hashMiddleware).Post("/updates", handler.UpdatesHandler(storage, flagKey))
-	r.With(hashMiddleware).Post("/updates/", handler.UpdatesHandler(storage, flagKey))
+	r.With(hashMiddleware).Post("/updates", handler.UpdatesHandler(storage, flagKey, aud))
+	r.With(hashMiddleware).Post("/updates/", handler.UpdatesHandler(storage, flagKey, aud))
 
 	r.Post("/value", valueHandlerJSON(storage))
 	r.Post("/value/", valueHandlerJSON(storage))
