@@ -2,7 +2,7 @@ package main
 
 import (
 	"flag"
-	"log"
+	"fmt"
 	"strings"
 
 	"github.com/caarlos0/env/v6"
@@ -26,7 +26,7 @@ type Config struct {
 }
 
 // parseFlags обрабатывает аргументы командной строки
-func parseFlags() {
+func parseFlags() error {
 
 	// регистрируем переменную flagRunAddr как аргумент -a со значением по умолчанию
 	// Флаг -a=<ЗНАЧЕНИЕ> отвечает за адрес эндпоинта HTTP-сервера (по умолчанию localhost:8080). (":8080", "http://localhost:8080/update", "localhost:8080")
@@ -51,15 +51,14 @@ func parseFlags() {
 
 	// проверка на неизвестные аргументы
 	if len(flag.Args()) > 0 {
-		log.Fatalf("Неизвестные аргументы: %v", flag.Args())
+		return fmt.Errorf("неизвестные аргументы: %v", flag.Args())
 	}
 
 	// читаем переменные окружения и заполняем структуру Config
 	// если переменные окружения не заданы, то будут использованы значения по умолчанию
 	var cfg Config
-	err := env.Parse(&cfg)
-	if err != nil {
-		log.Fatal(err)
+	if err := env.Parse(&cfg); err != nil {
+		return err
 	}
 
 	if envRunAddr := cfg.RunAddr; envRunAddr != "" {
@@ -92,5 +91,7 @@ func parseFlags() {
 	if flagRateLimit <= 0 {
 		flagRateLimit = 1 // безопасный дефолт: без параллелизма
 	}
+
+	return nil
 
 }

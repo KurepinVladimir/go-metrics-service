@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -152,7 +153,10 @@ func (a *Agent) collectMetrics() {
 
 func main() {
 
-	parseFlags() // обрабатываем аргументы командной строки
+	// обрабатываем аргументы командной строки
+	if err := parseFlags(); err != nil {
+		log.Fatal(err)
+	}
 
 	// запускаем агента
 	reportInterval := time.Duration(flagReportInterval) * time.Second // Интервал отправки метрик на сервер, по умолчанию 10 секунд
