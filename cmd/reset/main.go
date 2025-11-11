@@ -57,7 +57,7 @@ func run() error {
 		return errors.New("no packages found")
 	}
 	if packages.PrintErrors(pkgs) > 0 {
-		// не выходим — попробуем сгенерить то, что можем
+		fmt.Fprintln(os.Stderr, "generator: non-fatal package errors, continue")
 	}
 
 	// пакет -> список структур для генерации
