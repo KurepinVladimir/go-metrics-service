@@ -232,6 +232,7 @@ go tool pprof -top -diff_base=profiles\base.pprof profiles\result.pprof
 ---
 
 iter20
+
 Как помечать структуры
 В любом пакете, над объявлением типа:
 // generate:reset
@@ -248,4 +249,14 @@ type MyStruct struct {
 go run ./cmd/reset
 Появятся файлы reset.gen.go в тех пакетах, где нашли помеченные структуры. Они будут закоммичены в репо.
 
-iter21
+---
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---
+
+iter23
+
+Для сервера
+go build -ldflags "-X github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo.Version=v1.0.0 -X github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo.Date=2025-11-11 -X github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo.Commit=abc1234" -o server.exe ./cmd/server
+
+Для агента
+go build -ldflags "-X github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo.Version=v1.0.0 -X github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo.Date=2025-11-11 -X github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo.Commit=abc1234" -o agent.exe ./cmd/agent
