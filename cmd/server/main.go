@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/audit"
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/handler"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/middleware"
@@ -232,6 +233,8 @@ func initPostgres(dsn string) (*sql.DB, error) {
 }
 
 func main() {
+
+	buildinfo.Print()
 
 	// обрабатываем аргументы командной строки
 	parseFlags()

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/cryptohelpers"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/models"
@@ -152,6 +153,8 @@ func (a *Agent) collectMetrics() {
 }
 
 func main() {
+
+	buildinfo.Print()
 
 	// обрабатываем аргументы командной строки
 	if err := parseFlags(); err != nil {
