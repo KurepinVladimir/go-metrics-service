@@ -1,6 +1,6 @@
 module github.com/KurepinVladimir/go-musthave-metrics-tpl.git //module github.com/KurepinVladimir/go-metrics-service
 
-go 1.24.3
+go 1.25
 
 require (
 	github.com/caarlos0/env/v6 v6.10.1
