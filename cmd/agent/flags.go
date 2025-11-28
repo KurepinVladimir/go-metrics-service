@@ -15,6 +15,7 @@ var (
 	flagPollInterval   int64
 	flagKey            string
 	flagRateLimit      int
+	flagCryptoKey      string
 )
 
 type Config struct {
@@ -23,6 +24,7 @@ type Config struct {
 	PollInterval   int    `env:"POLL_INTERVAL"`
 	Key            string `env:"KEY"`
 	RateLimit      int    `env:"RATE_LIMIT"`
+	CryptoKey      string `env:"CRYPTO_KEY"`
 }
 
 // parseFlags обрабатывает аргументы командной строки
@@ -41,6 +43,8 @@ func parseFlags() error {
 	flag.StringVar(&flagKey, "k", "", "Key")
 
 	flag.IntVar(&flagRateLimit, "l", 0, "max concurrent outbound requests (RATE_LIMIT)")
+
+	flag.StringVar(&flagCryptoKey, "crypto-key", "", "path to RSA public key file")
 
 	// парсим переданные аргументы в зарегистрированные переменные
 	flag.Parse()
@@ -80,16 +84,16 @@ func parseFlags() error {
 		flagKey = envKey
 	}
 
-	// if envRateLimit := cfg.RateLimit; envRateLimit != 0 {
-	// 	flagRateLimit = int(envRateLimit)
-	// }
-
 	// RATE_LIMIT из окружения — дефолт для -l
 	if flagRateLimit == 0 && cfg.RateLimit > 0 {
 		flagRateLimit = cfg.RateLimit
 	}
 	if flagRateLimit <= 0 {
 		flagRateLimit = 1 // безопасный дефолт: без параллелизма
+	}
+
+	if cfg.CryptoKey != "" && flagCryptoKey == "" {
+		flagCryptoKey = cfg.CryptoKey
 	}
 
 	return nil
