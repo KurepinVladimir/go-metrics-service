@@ -17,6 +17,7 @@ var flagDatabaseDSN string
 var flagKey string
 var flagAuditFile string
 var flagAuditURL string
+var flagCryptoKey string
 
 type Config struct {
 	RunAddr         string `env:"ADDRESS"`
@@ -27,6 +28,7 @@ type Config struct {
 	Key             string `env:"KEY"`
 	AuditFile       string `env:"AUDIT_FILE"`
 	AuditURL        string `env:"AUDIT_URL"`
+	CryptoKey       string `env:"CRYPTO_KEY"`
 }
 
 // parseFlags обрабатывает аргументы командной строки
@@ -40,6 +42,7 @@ func parseFlags() {
 	flag.StringVar(&flagKey, "k", "", "Key")
 	flag.StringVar(&flagAuditFile, "audit-file", "", "path to audit log file")
 	flag.StringVar(&flagAuditURL, "audit-url", "", "URL of remote audit log server")
+	flag.StringVar(&flagCryptoKey, "crypto-key", "", "path to RSA private key file")
 
 	// парсим переданные серверу аргументы в зарегистрированные переменные
 	flag.Parse()
@@ -89,6 +92,10 @@ func parseFlags() {
 
 	if cfg.AuditURL != "" {
 		flagAuditURL = cfg.AuditURL
+	}
+
+	if cfg.CryptoKey != "" && flagCryptoKey == "" {
+		flagCryptoKey = cfg.CryptoKey
 	}
 
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 )
 
 var httpDelays = []time.Duration{time.Second, 3 * time.Second, 5 * time.Second}
+var rsaPublicKey *rsa.PublicKey
 
 // Agent инкапсулирует состояние и поведение агента для сбора и отправки метрик на сервер
 type Agent struct {
@@ -68,11 +70,22 @@ func (a *Agent) sendMetricJSON(metric models.Metrics) error {
 	// Отправляем сжатый JSON
 	return retry.DoIf(context.Background(), httpDelays, func(ctx context.Context) error {
 
+		bodyBytes := gzBuf.Bytes()
+
+		if rsaPublicKey != nil {
+			encBody, err := cryptohelpers.EncryptRSA(rsaPublicKey, bodyBytes)
+			if err != nil {
+				logger.Log.Debug("encrypt error", zap.Error(err))
+				return err
+			}
+			bodyBytes = encBody
+		}
+
 		req := a.Client.R().
 			SetHeader("Content-Type", "application/json").
 			SetHeader("Content-Encoding", "gzip").
 			SetHeader("Accept-Encoding", "gzip"). // Говорим серверу: "Я поддерживаю сжатые ответы"
-			SetBody(gzBuf.Bytes())
+			SetBody(bodyBytes)
 
 		if flagKey != "" {
 			hashStr := cryptohelpers.Sign(jsonBuf.Bytes(), flagKey) // Вычисляем HMAC-SHA256 от JSON
@@ -159,6 +172,14 @@ func main() {
 	// обрабатываем аргументы командной строки
 	if err := parseFlags(); err != nil {
 		log.Fatal(err)
+	}
+
+	if flagCryptoKey != "" {
+		key, err := cryptohelpers.LoadPublicKeyFromFile(flagCryptoKey)
+		if err != nil {
+			log.Fatalf("failed to load RSA public key from %s: %v", flagCryptoKey, err)
+		}
+		rsaPublicKey = key
 	}
 
 	// запускаем агента
