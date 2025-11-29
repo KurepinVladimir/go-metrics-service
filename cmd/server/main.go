@@ -54,7 +54,7 @@ func updateHandler(storage repository.Storage, aud *audit.Auditor) http.HandlerF
 			storage.UpdateGauge(r.Context(), name, value)
 
 			if aud != nil && aud.Enabled() {
-				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r), time.Now)
+				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r))
 			}
 
 		case "counter":
@@ -66,7 +66,7 @@ func updateHandler(storage repository.Storage, aud *audit.Auditor) http.HandlerF
 			storage.UpdateCounter(r.Context(), name, value)
 
 			if aud != nil && aud.Enabled() {
-				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r), time.Now)
+				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r))
 			}
 
 		default:
@@ -101,7 +101,7 @@ func updateHandlerJSON(storage repository.Storage, aud *audit.Auditor) http.Hand
 			storage.UpdateGauge(r.Context(), m.ID, *m.Value)
 			if aud != nil && aud.Enabled() {
 				ip := handler.ClientIP(r)
-				aud.Notify(r.Context(), []string{m.ID}, ip, time.Now)
+				aud.Notify(r.Context(), []string{m.ID}, ip)
 			}
 		case "counter":
 			if m.Delta == nil {
@@ -111,7 +111,7 @@ func updateHandlerJSON(storage repository.Storage, aud *audit.Auditor) http.Hand
 			storage.UpdateCounter(r.Context(), m.ID, *m.Delta)
 			if aud != nil && aud.Enabled() {
 				ip := handler.ClientIP(r)
-				aud.Notify(r.Context(), []string{m.ID}, ip, time.Now)
+				aud.Notify(r.Context(), []string{m.ID}, ip)
 			}
 		default:
 			http.Error(w, "unknown metric type", http.StatusNotImplemented)
