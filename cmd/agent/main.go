@@ -12,7 +12,10 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo"
@@ -236,9 +239,23 @@ func main() {
 	go collectSysLoop(ctx, 5*time.Second, jobs)
 
 	// Пул воркеров ограничивает число одновременных исходящих запросов
-	_ = startWorkers(ctx, flagRateLimit, jobs, agent)
+	wg := startWorkers(ctx, flagRateLimit, jobs, agent)
 
-	// Блокируемся (упрощённо). Для graceful shutdown можно ловить SIGINT/SIGTERM.
-	select {}
+	// Канал для системных сигналов
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
+	// Ждём первого сигнала
+	sig := <-sigCh
+	log.Printf("agent: received signal %s, shutting down", sig.String())
+
+	// Останавливаем генерацию новых задач (тикеры, collectSysLoop)
+	cancel()
+
+	// Больше новых задач не поступает, закрываем jobs,
+	// чтобы воркеры спокойно дочитали всё, что уже в очереди.
+	close(jobs)
+
+	// Ждём завершения всех воркеров — они дочитают канал и выйдут
+	wg.Wait()
 }
