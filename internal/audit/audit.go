@@ -27,12 +27,12 @@ func (a *Auditor) Enabled() bool {
 	return a != nil && len(a.sinks) > 0
 }
 
-func (a *Auditor) Notify(ctx context.Context, metrics []string, ip string, now func() time.Time) {
+func (a *Auditor) Notify(ctx context.Context, metrics []string, ip string) {
 	if !a.Enabled() {
 		return
 	}
 	ev := Event{
-		TS:        now().Unix(),
+		TS:        time.Now().UnixMilli(),
 		Metrics:   metrics,
 		IPAddress: ip,
 	}
