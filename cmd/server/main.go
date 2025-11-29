@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/audit"
@@ -344,8 +349,62 @@ func run() error {
 	r.Post("/value", valueHandlerJSON(storage))
 	r.Post("/value/", valueHandlerJSON(storage))
 
-	logger.Log.Info("Running server", zap.String("address", flagRunAddr))
+	// Готовим http.Server, чтобы уметь делать Shutdown
+	srv := &http.Server{
+		Addr:    flagRunAddr,
+		Handler: r,
+	}
 
-	return http.ListenAndServe(flagRunAddr, r)
+	// Канал для ошибок сервера
+	errCh := make(chan error, 1)
 
+	// Запускаем сервер в отдельной горутине
+	go func() {
+		logger.Log.Info("Running server", zap.String("address", flagRunAddr))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	// Канал для сигналов ОС
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
+	select {
+	case sig := <-stop:
+		logger.Log.Info("Received shutdown signal", zap.String("signal", sig.String()))
+
+		// Даём активным запросам возможность доработать
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(ctx); err != nil {
+			logger.Log.Error("HTTP server shutdown error", zap.Error(err))
+			return err
+		}
+
+		// Финально сохраняем метрики, если работаем с MemStorage и настроен файл
+		if memStorage, ok := storage.(*repository.MemStorage); ok && flagFileStoragePath != "" {
+			if err := memStorage.SaveToFile(flagFileStoragePath); err != nil {
+				logger.Log.Warn("Failed to save metrics on shutdown", zap.Error(err))
+			}
+		}
+
+		// При желании можно закрыть соединение с БД
+		if db != nil {
+			if err := db.Close(); err != nil {
+				logger.Log.Warn("Failed to close DB on shutdown", zap.Error(err))
+			}
+		}
+
+		return nil
+
+	case err := <-errCh:
+		// Сервер упал сам по себе, не через Shutdown
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 }
