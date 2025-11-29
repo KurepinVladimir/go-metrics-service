@@ -1,6 +1,6 @@
 module github.com/KurepinVladimir/go-musthave-metrics-tpl.git //module github.com/KurepinVladimir/go-metrics-service
 
-go 1.24.0
+go 1.24.3 // поднял go 1.25 но тесты Яндекса еще работают на 1.24
 
 require (
 	github.com/caarlos0/env/v6 v6.10.1
