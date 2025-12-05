@@ -190,10 +190,10 @@ func readAgentFileConfig(path string) (AgentFileConfig, error) {
 	var cfg AgentFileConfig
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, err
+		return cfg, fmt.Errorf("read agent config file %q: %w", path, err)
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, err
+		return cfg, fmt.Errorf("unmarshal agent config file %q: %w", path, err)
 	}
 	return cfg, nil
 }

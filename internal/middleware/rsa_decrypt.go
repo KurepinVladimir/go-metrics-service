@@ -8,6 +8,8 @@ import (
 	"crypto/rsa"
 
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/cryptohelpers"
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
+	"go.uber.org/zap"
 )
 
 func DecryptRSA(priv *rsa.PrivateKey) func(http.Handler) http.Handler {
@@ -24,7 +26,9 @@ func DecryptRSA(priv *rsa.PrivateKey) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
-				http.Error(w, "failed to read body", http.StatusInternalServerError)
+				logger.Log.Error("failed to read request body", zap.Error(err))
+				//  клиенту — только стандартную ошибку без деталей
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
 			_ = r.Body.Close()
@@ -36,7 +40,9 @@ func DecryptRSA(priv *rsa.PrivateKey) func(http.Handler) http.Handler {
 
 			plain, err := cryptohelpers.DecryptRSA(priv, body)
 			if err != nil {
-				http.Error(w, "failed to decrypt body", http.StatusBadRequest)
+				logger.Log.Warn("failed to decrypt request body", zap.Error(err))
+				//  клиенту — только стандартную ошибку без деталей
+				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 				return
 			}
 

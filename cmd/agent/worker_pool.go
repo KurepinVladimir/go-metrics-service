@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync"
 
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/models"
+	"go.uber.org/zap"
 )
 
 func startWorkers(ctx context.Context, n int, jobs <-chan models.Metrics, agent *Agent) *sync.WaitGroup {
@@ -27,7 +28,11 @@ func startWorkers(ctx context.Context, n int, jobs <-chan models.Metrics, agent 
 						return
 					}
 					if err := agent.sendMetricJSON(m); err != nil {
-						log.Printf("[worker %d] send error for %s: %v", id, m.ID, err)
+						logger.Log.Error("worker send error",
+							zap.Int("worker_id", id),
+							zap.String("metric_id", m.ID),
+							zap.Error(err),
+						)
 					}
 				}
 			}

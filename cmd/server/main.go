@@ -313,8 +313,8 @@ func run() error {
 
 	//Use добавляет middleware ко всем маршрутам, зарегистрированным через chi.Router.
 	r.Use(logger.RequestLogger)
-	// Добавляем middleware для обработки gzip-запросов и ответов
-	//r.Use(gzipRequestMiddleware) /
+
+	// Сжимаем ответы, если клиент поддерживает gzip
 	r.Use(gzipResponseMiddleware)
 
 	// middleware для подписи и расшифровки

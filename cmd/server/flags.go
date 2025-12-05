@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -200,10 +201,10 @@ func readFileConfig(path string) (FileConfig, error) {
 	var cfg FileConfig
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, err
+		return cfg, fmt.Errorf("read config file %q: %w", path, err)
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, err
+		return cfg, fmt.Errorf("unmarshal config file %q: %w", path, err)
 	}
 	return cfg, nil
 }

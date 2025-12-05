@@ -12,9 +12,9 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,32 +54,28 @@ func (a *Agent) sendMetricJSON(metric models.Metrics) error {
 	// Сериализуем метрику в JSON
 	var jsonBuf bytes.Buffer
 	if err := json.NewEncoder(&jsonBuf).Encode(metric); err != nil {
-		logger.Log.Debug("json encode error:", zap.Error(err))
-		return err
+		return fmt.Errorf("encode metric %q to JSON: %w", metric.ID, err)
 	}
 
 	// Сжимаем JSON в gzip
 	var gzBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzBuf)
+
 	if _, err := gz.Write(jsonBuf.Bytes()); err != nil {
-		logger.Log.Debug("gzip write error:", zap.Error(err))
-		return err
+		return fmt.Errorf("gzip write metric %q: %w", metric.ID, err)
 	}
 	if err := gz.Close(); err != nil {
-		logger.Log.Debug("gzip close error:", zap.Error(err))
-		return err
+		return fmt.Errorf("gzip close metric %q: %w", metric.ID, err)
 	}
 
-	// Отправляем сжатый JSON
+	// Отправляем сжатый (и, возможно, зашифрованный) JSON
 	return retry.DoIf(context.Background(), httpDelays, func(ctx context.Context) error {
-
 		bodyBytes := gzBuf.Bytes()
 
 		if rsaPublicKey != nil {
 			encBody, err := cryptohelpers.EncryptRSA(rsaPublicKey, bodyBytes)
 			if err != nil {
-				logger.Log.Debug("encrypt error", zap.Error(err))
-				return err
+				return fmt.Errorf("encrypt metric %q with RSA: %w", metric.ID, err)
 			}
 			bodyBytes = encBody
 		}
@@ -87,32 +83,37 @@ func (a *Agent) sendMetricJSON(metric models.Metrics) error {
 		req := a.Client.R().
 			SetHeader("Content-Type", "application/json").
 			SetHeader("Content-Encoding", "gzip").
-			SetHeader("Accept-Encoding", "gzip"). // Говорим серверу: "Я поддерживаю сжатые ответы"
+			SetHeader("Accept-Encoding", "gzip").
 			SetBody(bodyBytes)
 
 		if flagKey != "" {
-			hashStr := cryptohelpers.Sign(jsonBuf.Bytes(), flagKey) // Вычисляем HMAC-SHA256 от JSON
+			hashStr := cryptohelpers.Sign(jsonBuf.Bytes(), flagKey)
 			req.SetHeader("HashSHA256", hashStr)
 		}
 
 		resp, err := req.Post(a.ServerURL + "/update")
 		if err != nil {
-			// сетевой/транспортный сбой — считаем ретраибл, вернём err
-			logger.Log.Debug("send error", zap.Error(err))
-			return err
+			// сетевой/транспортный сбой — ретраибл, вернём err
+			return fmt.Errorf("send metric %q to %s/update: %w", metric.ID, a.ServerURL, err)
 		}
+
 		// 502/503/504 — ретраим
 		if resp.StatusCode() == http.StatusBadGateway ||
 			resp.StatusCode() == http.StatusServiceUnavailable ||
 			resp.StatusCode() == http.StatusGatewayTimeout {
 			return fmt.Errorf("temporary server error %d", resp.StatusCode())
 		}
+
 		// 4xx — НЕ ретраим, сразу фейл
 		if resp.StatusCode() >= 400 && resp.StatusCode() < 500 {
 			return fmt.Errorf("client error %d: %s", resp.StatusCode(), resp.String())
 		}
+
 		// успех
-		logger.Log.Debug("metric sent", zap.String("id", metric.ID), zap.String("type", metric.MType))
+		logger.Log.Debug("metric sent",
+			zap.String("id", metric.ID),
+			zap.String("type", metric.MType))
+
 		return nil
 	}, func(err error) bool {
 		// retryIf: ретраим только сетевые ошибки (err != nil)
@@ -169,7 +170,6 @@ func (a *Agent) collectMetrics() {
 }
 
 func main() {
-
 	buildinfo.Print()
 
 	// обрабатываем аргументы командной строки
@@ -185,22 +185,30 @@ func main() {
 		rsaPublicKey = key
 	}
 
-	// запускаем агента
-	reportInterval := time.Duration(flagReportInterval) * time.Second // Интервал отправки метрик на сервер, по умолчанию 10 секунд
-	pollInterval := time.Duration(flagPollInterval) * time.Second     // Интервал обновления метрик, по умолчанию 2 секунды
+	// интервалы работы агента
+	reportInterval := time.Duration(flagReportInterval) * time.Second
+	pollInterval := time.Duration(flagPollInterval) * time.Second
 
-	agent := NewAgent(flagRunAddr) // Создаём нового агента с адресом сервера
+	agent := NewAgent(flagRunAddr)
 
 	// Канал заданий на отправку
 	jobs := make(chan models.Metrics, 2048)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Контекст, который завершится по сигналу SIGINT/SIGTERM/SIGQUIT
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
 
-	// (а) Сбор runtime по pollInterval — только обновляет состояние агентa
+	// --- продюсеры (те, кто пишет в jobs) ---
+	var prodWG sync.WaitGroup
+
+	// (а) Сбор runtime по pollInterval
+	prodWG.Add(1)
 	go func() {
+		defer prodWG.Done()
 		t := time.NewTicker(pollInterval)
 		defer t.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -212,9 +220,12 @@ func main() {
 	}()
 
 	// (б) Формирование заданий для отправки по reportInterval
+	prodWG.Add(1)
 	go func() {
+		defer prodWG.Done()
 		t := time.NewTicker(reportInterval)
 		defer t.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -235,27 +246,26 @@ func main() {
 		}
 	}()
 
-	// (в) Системные метрики через gopsutil (каждые 5s)
-	go collectSysLoop(ctx, 5*time.Second, jobs)
+	// (в) Системные метрики через gopsutil
+	prodWG.Add(1)
+	go func() {
+		defer prodWG.Done()
+		collectSysLoop(ctx, 5*time.Second, jobs)
+	}()
 
 	// Пул воркеров ограничивает число одновременных исходящих запросов
 	wg := startWorkers(ctx, flagRateLimit, jobs, agent)
 
-	// Канал для системных сигналов
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	// ---- graceful shutdown ----
+	<-ctx.Done()
+	log.Println("agent: received shutdown signal")
 
-	// Ждём первого сигнала
-	sig := <-sigCh
-	log.Printf("agent: received signal %s, shutting down", sig.String())
+	// ждём, пока продюсеры перестанут писать в канал
+	prodWG.Wait()
 
-	// Останавливаем генерацию новых задач (тикеры, collectSysLoop)
-	cancel()
-
-	// Больше новых задач не поступает, закрываем jobs,
-	// чтобы воркеры спокойно дочитали всё, что уже в очереди.
+	// теперь безопасно закрываем jobs — новых записей уже не будет
 	close(jobs)
 
-	// Ждём завершения всех воркеров — они дочитают канал и выйдут
+	// ждём, пока все воркеры дочитают и отправят оставшиеся метрики
 	wg.Wait()
 }

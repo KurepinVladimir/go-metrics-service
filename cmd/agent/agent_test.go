@@ -14,6 +14,11 @@ import (
 )
 
 func TestSendMetricJSON(t *testing.T) {
+
+	// на всякий случай сбрасываем глобальные настройки, чтобы другие тесты не влияли
+	rsaPublicKey = nil
+	flagKey = ""
+
 	// Ожидаемая метрика, которую будем отправлять
 	expectedMetric := models.Metrics{
 		ID:    "TestMetric",
