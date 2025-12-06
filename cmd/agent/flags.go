@@ -1,17 +1,17 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/caarlos0/env/v6"
+	"github.com/spf13/viper"
 )
 
-// неэкспортированная переменная flagRunAddr содержит адрес и порт для запроса
+// Глобальные переменные, которые дальше использует main.go
 var (
 	flagRunAddr        string
 	flagReportInterval int64
@@ -21,145 +21,104 @@ var (
 	flagCryptoKey      string
 )
 
-// Config — слой переменных окружения
-type Config struct {
-	RunAddr        string `env:"ADDRESS"`
-	ReportInterval int    `env:"REPORT_INTERVAL"` // в секундах
-	PollInterval   int    `env:"POLL_INTERVAL"`   // в секундах
-	Key            string `env:"KEY"`
-	RateLimit      int    `env:"RATE_LIMIT"`
-	CryptoKey      string `env:"CRYPTO_KEY"`
-	ConfigPath     string `env:"CONFIG"` // путь к JSON-конфигу
+// agentConfig — "склейка" конфигурации из файла + env.
+// Viper будет мапить сюда значения по ключам:
+//   - address         ← JSON "address" или env ADDRESS
+//   - report_interval ← JSON "report_interval" или env REPORT_INTERVAL
+//   - poll_interval   ← JSON "poll_interval" или env POLL_INTERVAL
+//   - key             ← JSON "key" или env KEY
+//   - rate_limit      ← JSON "rate_limit" или env RATE_LIMIT
+//   - crypto_key      ← JSON "crypto_key" или env CRYPTO_KEY
+type agentConfig struct {
+	Address        string `mapstructure:"address"`
+	ReportInterval string `mapstructure:"report_interval"`
+	PollInterval   string `mapstructure:"poll_interval"`
+	Key            string `mapstructure:"key"`
+	RateLimit      int    `mapstructure:"rate_limit"`
+	CryptoKey      string `mapstructure:"crypto_key"`
 }
 
-// AgentFileConfig — слой JSON-конфига
+// parseFlags обрабатывает конфигурацию агента.
+// Приоритет источников:
 //
-//	{
-//	  "address": "localhost:8080",
-//	  "report_interval": "1s",
-//	  "poll_interval": "1s",
-//	  "crypto_key": "/path/to/key.pem"
-//	}
-type AgentFileConfig struct {
-	Address        string `json:"address"`
-	ReportInterval string `json:"report_interval"`
-	PollInterval   string `json:"poll_interval"`
-	CryptoKey      string `json:"crypto_key"`
-}
-
-// parseFlags обрабатывает аргументы командной строки
-// Приоритет: значения из файла < переменные окружения < флаги
+//  1. JSON-файл (CONFIG или -c/-config)
+//  2. переменные окружения
+//  3. флаги командной строки
+//
+// Viper объединяет (1) и (2) → даёт нам "базовый" конфиг.
+// Потом мы регистрируем флаги с дефолтами из этого конфига,
+// и флаги уже имеют самый высокий приоритет.
 func parseFlags() error {
-	// ----- 1. Базовые дефолты (как раньше) -----
-	defaultRunAddr := "http://localhost:8080"
-	defaultReportInterval := int64(10) // секунд
-	defaultPollInterval := int64(2)    // секунд
-	defaultRateLimit := 1
+	// -------- 1. Определяем откуда брать путь к JSON-конфигу --------
 
-	runAddr := defaultRunAddr
-	reportInterval := defaultReportInterval
-	pollInterval := defaultPollInterval
-	key := ""
-	rateLimit := defaultRateLimit
-	cryptoKey := ""
+	// Базово: из переменной окружения CONFIG
+	configPath := os.Getenv("CONFIG")
 
-	// ----- 2. Читаем CONFIG из окружения -----
-	var envCfg Config
-	_ = env.Parse(&envCfg) // пока интересен envCfg.ConfigPath и компания
-
-	configPath := envCfg.ConfigPath
-
-	// ----- 3. Смотрим -c / -config в os.Args (флаги перекрывают CONFIG для пути к файлу) -----
+	// Но флаги -c / -config должны иметь больший приоритет
+	// Сначала вытащим их "вручную" из сырого os.Args, до flag.Parse.
 	if argPath := findConfigPathInArgs(os.Args[1:]); argPath != "" {
 		configPath = argPath
 	}
 
-	// ----- 4. Если указан JSON-файл — читаем и накладываем слой "file" -----
-	if configPath != "" {
-		if fileCfg, err := readAgentFileConfig(configPath); err == nil {
-			if fileCfg.Address != "" {
-				runAddr = fileCfg.Address
-			}
-			if fileCfg.ReportInterval != "" {
-				if secs := parseDurationToSeconds(fileCfg.ReportInterval); secs > 0 {
-					reportInterval = secs
-				}
-			}
-			if fileCfg.PollInterval != "" {
-				if secs := parseDurationToSeconds(fileCfg.PollInterval); secs > 0 {
-					pollInterval = secs
-				}
-			}
-			if fileCfg.CryptoKey != "" {
-				cryptoKey = fileCfg.CryptoKey
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "cannot read agent config file %s: %v\n", configPath, err)
-		}
+	// -------- 2. Загружаем базовый конфиг (файл + env) через Viper --------
+
+	cfg, err := loadAgentConfigWithViper(configPath)
+	if err != nil {
+		// Для учебного проекта — не падаем, а логируем на stderr и продолжаем
+		// с дефолтами Viper (cfg будет нулём, но Viper нам уже подставил
+		// дефолты при Unmarshal).
+		fmt.Fprintf(os.Stderr, "agent: cannot load config %q: %v\n", configPath, err)
 	}
 
-	// ----- 5. Накладываем слой "env" поверх файла -----
+	// report_interval и poll_interval у нас в конфиге хранятся как строка:
+	//  - из файла: "1s", "5s", "2m"
+	//  - из env: "10" (секунды), "10s" и т.п.
+	// Приводим их к секундам для глобальных флагов.
+	flagReportInterval = parseDurationToSeconds(cfg.ReportInterval, 10) // дефолт 10s
+	flagPollInterval = parseDurationToSeconds(cfg.PollInterval, 2)      // дефолт 2s
 
-	if envCfg.RunAddr != "" {
-		runAddr = envCfg.RunAddr
-	}
+	// -------- 3. Регистрируем флаги с дефолтами из (file+env) --------
 
-	if envCfg.ReportInterval > 0 {
-		reportInterval = int64(envCfg.ReportInterval)
-	}
+	// Адрес сервера: дефолт берём из cfg.Address (файл/ENV).
+	// Если в конфиге он пустой — Viper уже подставил "http://localhost:8080".
+	flag.StringVar(&flagRunAddr, "a", cfg.Address, "address and port")
 
-	if envCfg.PollInterval > 0 {
-		pollInterval = int64(envCfg.PollInterval)
-	}
+	// Частота отправки метрик, в секундах
+	flag.Int64Var(&flagReportInterval, "r", flagReportInterval, "report interval in seconds")
 
-	if envCfg.Key != "" {
-		key = envCfg.Key
-	}
+	// Частота опроса runtime-метрик, в секундах
+	flag.Int64Var(&flagPollInterval, "p", flagPollInterval, "poll interval in seconds")
 
-	if envCfg.RateLimit > 0 {
-		rateLimit = envCfg.RateLimit
-	}
+	// Ключ для подписи HMAC
+	flag.StringVar(&flagKey, "k", cfg.Key, "Key")
 
-	if envCfg.CryptoKey != "" {
-		cryptoKey = envCfg.CryptoKey
-	}
+	// Ограничение числа параллельных запросов
+	flag.IntVar(&flagRateLimit, "l", cfg.RateLimit, "max concurrent outbound requests (RATE_LIMIT)")
 
-	// ----- 6. Регистрируем флаги с дефолтами из (file+env) -----
+	// Путь к публичному RSA-ключу
+	flag.StringVar(&flagCryptoKey, "crypto-key", cfg.CryptoKey, "path to RSA public key file")
 
-	// Флаг -a=<ЗНАЧЕНИЕ> отвечает за адрес эндпоинта HTTP-сервера.
-	flag.StringVar(&flagRunAddr, "a", runAddr, "address and port")
-
-	// -r: частота отправки метрик на сервер, в секундах
-	flag.Int64Var(&flagReportInterval, "r", reportInterval, "report interval in seconds")
-
-	// -p: частота опроса метрик runtime, в секундах
-	flag.Int64Var(&flagPollInterval, "p", pollInterval, "poll interval in seconds")
-
-	flag.StringVar(&flagKey, "k", key, "Key")
-
-	flag.IntVar(&flagRateLimit, "l", rateLimit, "max concurrent outbound requests (RATE_LIMIT)")
-
-	flag.StringVar(&flagCryptoKey, "crypto-key", cryptoKey, "path to RSA public key file")
-
-	// чтобы -c/-config отображались в help, но значение уже прочитано выше
+	// Чтобы -config / -c были в help, но значение мы уже учитываем выше
 	var configDummy string
 	flag.StringVar(&configDummy, "config", configPath, "path to JSON config file")
 	flag.StringVar(&configDummy, "c", configPath, "path to JSON config file (shorthand)")
 
-	// ----- 7. Парсим переданные аргументы в зарегистрированные переменные (флаги — самый высокий приоритет) -----
+	// -------- 4. Парсим флаги (они имеют высший приоритет) --------
+
 	flag.Parse()
 
-	// Нормализуем адрес: добавляем http:// если нужно
-	if !strings.HasPrefix(flagRunAddr, "http://") && !strings.HasPrefix(flagRunAddr, "https://") {
-		flagRunAddr = "http://" + flagRunAddr
-	}
-
-	// проверка на неизвестные аргументы
+	// Проверка на неизвестные позиционные аргументы
 	if len(flag.Args()) > 0 {
 		return fmt.Errorf("неизвестные аргументы: %v", flag.Args())
 	}
 
-	// RATE_LIMIT — защита от нуля/отрицательных значений
+	// Нормализуем адрес: если пользователь указал "localhost:8080",
+	// добавим префикс "http://".
+	if !strings.HasPrefix(flagRunAddr, "http://") && !strings.HasPrefix(flagRunAddr, "https://") {
+		flagRunAddr = "http://" + flagRunAddr
+	}
+
+	// RATE_LIMIT защитим от нуля и отрицательных значений.
 	if flagRateLimit <= 0 {
 		flagRateLimit = 1
 	}
@@ -167,7 +126,89 @@ func parseFlags() error {
 	return nil
 }
 
-// findConfigPathInArgs ищет -c / -config в сыром os.Args (до flag.Parse)
+// loadAgentConfigWithViper загружает конфиг агента:
+//
+// - задаёт дефолты (address, report_interval, poll_interval, rate_limit, key, crypto_key)
+// - читает JSON-файл (если задан configPath)
+// - читает переменные окружения (ADDRESS, REPORT_INTERVAL, ...)
+// - возвращает склеенный agentConfig
+func loadAgentConfigWithViper(configPath string) (agentConfig, error) {
+	v := viper.New()
+
+	// ----- Дефолты -----
+	// Здесь мы задаём начальные значения, которые будут использованы,
+	// если ни файл, ни ENV ничего не переопределили.
+	v.SetDefault("address", "http://localhost:8080")
+	v.SetDefault("report_interval", "10s") // строки "10s", "2s" и т.п.
+	v.SetDefault("poll_interval", "2s")
+	v.SetDefault("rate_limit", 1)
+	v.SetDefault("key", "")
+	v.SetDefault("crypto_key", "")
+
+	// ----- ENV -----
+	// Преобразуем ключи вида "report_interval" → "REPORT_INTERVAL"
+	// чтобы Viper мог найти значение в переменных окружения.
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	// Теперь:
+	//   "address"         ← окружение ADDRESS
+	//   "report_interval" ← окружение REPORT_INTERVAL
+	//   "poll_interval"   ← окружение POLL_INTERVAL
+	//   "rate_limit"      ← окружение RATE_LIMIT
+	//   "key"             ← окружение KEY
+	//   "crypto_key"      ← окружение CRYPTO_KEY
+
+	// ----- JSON-файл (если указан) -----
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+		if err := v.ReadInConfig(); err != nil {
+			// Оборачиваем ошибку с контекстом.
+			return agentConfig{}, fmt.Errorf("read config file %q: %w", configPath, err)
+		}
+	}
+
+	// ----- Unmarshal в структуру -----
+	var cfg agentConfig
+	if err := v.Unmarshal(&cfg); err != nil {
+		return agentConfig{}, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// parseDurationToSeconds принимает строку из конфига/env и приводит её к секундам.
+//
+// Поддерживает оба варианта:
+//   - "10s", "1m", "2h"  → парсим через time.ParseDuration
+//   - "10"               → трактуем как "10 секунд"
+//
+// Если строка пустая или нераспознаваемая — возвращаем дефолт.
+func parseDurationToSeconds(s string, def int64) int64 {
+	if s == "" {
+		return def
+	}
+
+	// Сначала пробуем как duration ("1s", "2m", "500ms")
+	if d, err := time.ParseDuration(s); err == nil {
+		secs := int64(d.Seconds())
+		if secs > 0 {
+			return secs
+		}
+	}
+
+	// Если не получилось — пробуем как целое число секунд ("10")
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+		return n
+	}
+
+	// В крайнем случае возвращаем дефолт
+	return def
+}
+
+// findConfigPathInArgs ищет -c / -config в сырых аргументах os.Args.
+// Это нужно сделать до flag.Parse, чтобы знать,
+// какой файл конфигурации читать в loadAgentConfigWithViper.
 func findConfigPathInArgs(args []string) string {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -183,29 +224,4 @@ func findConfigPathInArgs(args []string) string {
 		}
 	}
 	return ""
-}
-
-// readAgentFileConfig читает JSON-конфиг агента
-func readAgentFileConfig(path string) (AgentFileConfig, error) {
-	var cfg AgentFileConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, fmt.Errorf("read agent config file %q: %w", path, err)
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("unmarshal agent config file %q: %w", path, err)
-	}
-	return cfg, nil
-}
-
-// parseDurationToSeconds парсит "1s", "5m", "2h" → секунды
-func parseDurationToSeconds(s string) int64 {
-	if s == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0
-	}
-	return int64(d.Seconds())
 }
