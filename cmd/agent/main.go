@@ -37,6 +37,7 @@ type Agent struct {
 	Metrics     map[string]float64 // метрики типа gauge из runtime
 	Client      *resty.Client      // HTTP-клиент
 	ServerURL   string             // адрес сервера
+	RealIP      string             // IP-адрес хоста агента
 }
 
 // NewAgent создаёт и возвращает новый экземпляр агента
@@ -45,7 +46,43 @@ func NewAgent(serverURL string) *Agent {
 		Metrics:   make(map[string]float64), // инициализируем хранилище метрик
 		Client:    resty.New(),              // Создаём HTTP-клиент resty
 		ServerURL: serverURL,                // Адрес сервера, куда будем отправлять метрики
+		RealIP:    detectAgentIP(),
 	}
+}
+
+func detectAgentIP() string {
+	ifaces, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+
+	for _, addr := range ifaces {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+	}
+
+	return ""
+}
+
+func (a *Agent) realIP() string {
+	if a.RealIP == "" {
+		a.RealIP = detectAgentIP()
+		if a.RealIP == "" {
+			a.RealIP = "127.0.0.1"
+		}
+	}
+	return a.RealIP
 }
 
 // sendMetricJSON отправляет одну метрику на сервер в формате JSON, сжатом через gzip
@@ -84,6 +121,7 @@ func (a *Agent) sendMetricJSON(metric models.Metrics) error {
 			SetHeader("Content-Type", "application/json").
 			SetHeader("Content-Encoding", "gzip").
 			SetHeader("Accept-Encoding", "gzip").
+			SetHeader("X-Real-IP", a.realIP()).
 			SetBody(bodyBytes)
 
 		if flagKey != "" {

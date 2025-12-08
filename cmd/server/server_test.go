@@ -397,7 +397,7 @@ func TestAudit_OnUpdatePath(t *testing.T) {
 	case ev := <-ch:
 		assert.ElementsMatch(t, []string{"M1"}, ev.Metrics)
 		assert.Equal(t, "198.51.100.1", ev.IPAddress)
-		assert.InDelta(t, time.Now().Unix(), ev.TS, 5) // 5 секунд допуск
+		assert.InDelta(t, time.Now().UnixMilli(), ev.TS, 5000) // 5 секунд допуск в миллисекундах
 	default:
 		t.Fatalf("expected an audit event")
 	}
@@ -458,7 +458,7 @@ func TestAudit_OnUpdatesBatch(t *testing.T) {
 		assert.ElementsMatch(t, []string{"G1", "C1"}, ev.Metrics)
 		assert.Equal(t, "192.0.2.55", ev.IPAddress)
 		// ts ~ сейчас
-		assert.InDelta(t, time.Now().Unix(), ev.TS, 5)
+		assert.InDelta(t, time.Now().UnixMilli(), ev.TS, 5000)
 	case <-time.After(200 * time.Millisecond):
 		t.Fatalf("expected an audit event")
 	}
@@ -478,7 +478,8 @@ func TestParseFlags_ConfigFileOnly(t *testing.T) {
 		"store_interval": "5s",
 		"store_file": "/tmp/test-db.json",
 		"database_dsn": "postgres://user:pass@localhost:5432/db",
-		"crypto_key": "/tmp/test-key.pem"
+		"crypto_key": "/tmp/test-key.pem",
+		"trusted_subnet": "10.0.0.0/24"
 	}`
 
 	f, err := os.CreateTemp("", "server-config-*.json")
@@ -511,6 +512,7 @@ func TestParseFlags_ConfigFileOnly(t *testing.T) {
 	assert.True(t, flagRestore)
 	assert.Equal(t, "postgres://user:pass@localhost:5432/db", flagDatabaseDSN)
 	assert.Equal(t, "/tmp/test-key.pem", flagCryptoKey)
+	assert.Equal(t, "10.0.0.0/24", flagTrustedSubnet)
 }
 
 // Проверяем приоритет: значения из файла < env < флаги
@@ -522,7 +524,8 @@ func TestParseFlags_Priority_FileEnvFlags(t *testing.T) {
 		"store_interval": "1s",
 		"store_file": "/tmp/from-file-db.json",
 		"database_dsn": "postgres://file@localhost:5432/db",
-		"crypto_key": "/tmp/file-key.pem"
+		"crypto_key": "/tmp/file-key.pem",
+		"trusted_subnet": "10.0.0.0/24"
 	}`
 
 	f, err := os.CreateTemp("", "server-config-*.json")
@@ -541,6 +544,7 @@ func TestParseFlags_Priority_FileEnvFlags(t *testing.T) {
 	t.Setenv("FILE_STORAGE_PATH", "/tmp/from-env-db.json")
 	t.Setenv("DATABASE_DSN", "postgres://env@localhost:5432/db")
 	t.Setenv("CRYPTO_KEY", "/tmp/env-key.pem")
+	t.Setenv("TRUSTED_SUBNET", "192.168.0.0/16")
 
 	// os.Args: и файл, и флаги
 	oldArgs := os.Args
@@ -551,6 +555,7 @@ func TestParseFlags_Priority_FileEnvFlags(t *testing.T) {
 		"-config", f.Name(), // путь до файла
 		"-a", "from-flag:3", // флаг перекрывает env ADDRESS
 		"-i", "30", // флаг перекрывает env STORE_INTERVAL=20
+		"-t", "203.0.113.0/24",
 		// -f не задаём → FILE_STORAGE_PATH берётся из env
 	}
 
@@ -578,4 +583,7 @@ func TestParseFlags_Priority_FileEnvFlags(t *testing.T) {
 
 	// CRYPTO_KEY: file < env, флага нет
 	assert.Equal(t, "/tmp/env-key.pem", flagCryptoKey)
+
+	// TRUSTED_SUBNET: file (10.0.0.0/24) < env (192.168.0.0/16) < flag (203.0.113.0/24)
+	assert.Equal(t, "203.0.113.0/24", flagTrustedSubnet)
 }
