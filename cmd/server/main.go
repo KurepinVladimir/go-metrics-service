@@ -1,16 +1,23 @@
 package main
 
 import (
+	"context"
+	"crypto/rsa"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/audit"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/buildinfo"
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/cryptohelpers"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/handler"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/middleware"
@@ -21,6 +28,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"go.uber.org/zap"
 )
+
+var rsaPrivateKey *rsa.PrivateKey
 
 // handler обрабатывает POST-запросы на /update/{type}/{name}/{value}
 func updateHandler(storage repository.Storage, aud *audit.Auditor) http.HandlerFunc {
@@ -45,7 +54,7 @@ func updateHandler(storage repository.Storage, aud *audit.Auditor) http.HandlerF
 			storage.UpdateGauge(r.Context(), name, value)
 
 			if aud != nil && aud.Enabled() {
-				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r), time.Now)
+				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r))
 			}
 
 		case "counter":
@@ -57,7 +66,7 @@ func updateHandler(storage repository.Storage, aud *audit.Auditor) http.HandlerF
 			storage.UpdateCounter(r.Context(), name, value)
 
 			if aud != nil && aud.Enabled() {
-				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r), time.Now)
+				aud.Notify(r.Context(), []string{name}, handler.ClientIP(r))
 			}
 
 		default:
@@ -92,7 +101,7 @@ func updateHandlerJSON(storage repository.Storage, aud *audit.Auditor) http.Hand
 			storage.UpdateGauge(r.Context(), m.ID, *m.Value)
 			if aud != nil && aud.Enabled() {
 				ip := handler.ClientIP(r)
-				aud.Notify(r.Context(), []string{m.ID}, ip, time.Now)
+				aud.Notify(r.Context(), []string{m.ID}, ip)
 			}
 		case "counter":
 			if m.Delta == nil {
@@ -102,7 +111,7 @@ func updateHandlerJSON(storage repository.Storage, aud *audit.Auditor) http.Hand
 			storage.UpdateCounter(r.Context(), m.ID, *m.Delta)
 			if aud != nil && aud.Enabled() {
 				ip := handler.ClientIP(r)
-				aud.Notify(r.Context(), []string{m.ID}, ip, time.Now)
+				aud.Notify(r.Context(), []string{m.ID}, ip)
 			}
 		default:
 			http.Error(w, "unknown metric type", http.StatusNotImplemented)
@@ -248,6 +257,14 @@ func main() {
 // функция run будет полезна при инициализации зависимостей сервера перед запуском
 func run() error {
 
+	if flagCryptoKey != "" {
+		key, err := cryptohelpers.LoadPrivateKeyFromFile(flagCryptoKey)
+		if err != nil {
+			log.Fatalf("failed to load RSA private key from %s: %v", flagCryptoKey, err)
+		}
+		rsaPrivateKey = key
+	}
+
 	if err := logger.Initialize("INFO"); err != nil {
 		return err
 	}
@@ -296,31 +313,98 @@ func run() error {
 
 	//Use добавляет middleware ко всем маршрутам, зарегистрированным через chi.Router.
 	r.Use(logger.RequestLogger)
-	// Добавляем middleware для обработки gzip-запросов и ответов
-	r.Use(gzipRequestMiddleware)
+
+	// Сжимаем ответы, если клиент поддерживает gzip
 	r.Use(gzipResponseMiddleware)
 
-	r.Post("/update/{type}/{name}/{value}", updateHandler(storage, aud)) // Регистрируем маршрут с параметрами
-
+	// middleware для подписи и расшифровки
 	hashMiddleware := middleware.ValidateHashSHA256(flagKey)
+	decryptMiddleware := middleware.DecryptRSA(rsaPrivateKey)
 
-	r.With(hashMiddleware).Post("/update", updateHandlerJSON(storage, aud))
-	r.With(hashMiddleware).Post("/update/", updateHandlerJSON(storage, aud))
-
-	r.With(hashMiddleware).Post("/updates", handler.UpdatesHandler(storage, flagKey, aud))
-	r.With(hashMiddleware).Post("/updates/", handler.UpdatesHandler(storage, flagKey, aud))
-
-	r.Post("/value", valueHandlerJSON(storage))
-	r.Post("/value/", valueHandlerJSON(storage))
-
+	// --- "текстовые" ручки без шифрования/HMAC ---
+	r.Post("/update/{type}/{name}/{value}", updateHandler(storage, aud)) // Регистрируем маршрут с параметрами
 	r.Get("/value/{type}/{name}", valueHandler(storage))
 	r.Get("/", indexHandler(storage))
-
 	if db != nil {
 		r.Get("/ping", pingHandler(db)) //проверяет соединение с базой данных.
 	}
 
-	logger.Log.Info("Running server", zap.String("address", flagRunAddr))
+	// --- JSON-эндпоинты, куда стучится агент: RSA → gzip-распаковка → проверка HMAC ---
+	r.Group(func(r chi.Router) {
+		// 1) сначала расшифровываем тело (если есть приватный ключ)
+		r.Use(decryptMiddleware)
+		// 2) потом, если Content-Encoding: gzip, распаковываем
+		r.Use(gzipRequestMiddleware)
+		// 3) потом проверяем подпись по JSON
+		r.Use(hashMiddleware)
 
-	return http.ListenAndServe(flagRunAddr, r)
+		r.Post("/update", updateHandlerJSON(storage, aud))
+		r.Post("/update/", updateHandlerJSON(storage, aud))
+
+		r.Post("/updates", handler.UpdatesHandler(storage, flagKey, aud))
+		r.Post("/updates/", handler.UpdatesHandler(storage, flagKey, aud))
+	})
+
+	// JSON-ручка /value оставлена без шифрования/HMAC (для удобства внешних клиентов)
+	r.Post("/value", valueHandlerJSON(storage))
+	r.Post("/value/", valueHandlerJSON(storage))
+
+	// Готовим http.Server, чтобы уметь делать Shutdown
+	srv := &http.Server{
+		Addr:    flagRunAddr,
+		Handler: r,
+	}
+
+	// Канал для ошибок сервера
+	errCh := make(chan error, 1)
+
+	// Запускаем сервер в отдельной горутине
+	go func() {
+		logger.Log.Info("Running server", zap.String("address", flagRunAddr))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	// Канал для сигналов ОС
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
+	select {
+	case sig := <-stop:
+		logger.Log.Info("Received shutdown signal", zap.String("signal", sig.String()))
+
+		// Даём активным запросам возможность доработать
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(ctx); err != nil {
+			logger.Log.Error("HTTP server shutdown error", zap.Error(err))
+			return err
+		}
+
+		// Финально сохраняем метрики, если работаем с MemStorage и настроен файл
+		if memStorage, ok := storage.(*repository.MemStorage); ok && flagFileStoragePath != "" {
+			if err := memStorage.SaveToFile(flagFileStoragePath); err != nil {
+				logger.Log.Warn("Failed to save metrics on shutdown", zap.Error(err))
+			}
+		}
+
+		// При желании можно закрыть соединение с БД
+		if db != nil {
+			if err := db.Close(); err != nil {
+				logger.Log.Warn("Failed to close DB on shutdown", zap.Error(err))
+			}
+		}
+
+		return nil
+
+	case err := <-errCh:
+		// Сервер упал сам по себе, не через Shutdown
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 }

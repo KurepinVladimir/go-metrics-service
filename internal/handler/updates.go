@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/audit"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/models"
@@ -101,7 +100,7 @@ func UpdatesHandler(storage repository.Storage, key string, aud *audit.Auditor) 
 
 		// аудит после успеха
 		if aud != nil && aud.Enabled() {
-			aud.Notify(r.Context(), names, ClientIP(r), time.Now)
+			aud.Notify(r.Context(), names, ClientIP(r))
 		}
 
 		//_ = WriteSignedJSONResponse(w, []byte(`{"status":"ok"}`), key)

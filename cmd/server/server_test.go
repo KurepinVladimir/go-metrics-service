@@ -4,10 +4,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -464,3 +466,116 @@ func TestAudit_OnUpdatesBatch(t *testing.T) {
 
 func ptrF(v float64) *float64 { return &v }
 func ptrI(v int64) *int64     { return &v }
+
+// ===================== ТЕСТЫ КОНФИГА / ФЛАГОВ =====================
+
+// Проверяем, что значения из JSON-конфига подхватываются, если нет env и флагов
+func TestParseFlags_ConfigFileOnly(t *testing.T) {
+	// Подготовка временного файла конфигурации
+	cfgJSON := `{
+		"address": "localhost:9999",
+		"restore": true,
+		"store_interval": "5s",
+		"store_file": "/tmp/test-db.json",
+		"database_dsn": "postgres://user:pass@localhost:5432/db",
+		"crypto_key": "/tmp/test-key.pem"
+	}`
+
+	f, err := os.CreateTemp("", "server-config-*.json")
+	assert.NoError(t, err)
+	defer os.Remove(f.Name())
+
+	_, err = f.WriteString(cfgJSON)
+	assert.NoError(t, err)
+	assert.NoError(t, f.Close())
+
+	// Чистим CONFIG, чтобы путь до файла взялся из аргумента
+	t.Setenv("CONFIG", "")
+
+	// Сохраняем и восстанавливаем os.Args
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"server.test", "-config", f.Name()}
+
+	// Сбрасываем стандартный FlagSet, чтобы флаги можно было регистрировать заново
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	// Вызываем parseFlags
+	parseFlags()
+
+	// Проверяем, что значения подхватились из файла
+	assert.Equal(t, "localhost:9999", flagRunAddr)
+	assert.Equal(t, int64(5), flagStoreInterval) // "5s" → 5 секунд
+	assert.Equal(t, "/tmp/test-db.json", flagFileStoragePath)
+	assert.True(t, flagRestore)
+	assert.Equal(t, "postgres://user:pass@localhost:5432/db", flagDatabaseDSN)
+	assert.Equal(t, "/tmp/test-key.pem", flagCryptoKey)
+}
+
+// Проверяем приоритет: значения из файла < env < флаги
+func TestParseFlags_Priority_FileEnvFlags(t *testing.T) {
+	// JSON-конфиг с начальными значениями
+	cfgJSON := `{
+		"address": "from-file:1",
+		"restore": false,
+		"store_interval": "1s",
+		"store_file": "/tmp/from-file-db.json",
+		"database_dsn": "postgres://file@localhost:5432/db",
+		"crypto_key": "/tmp/file-key.pem"
+	}`
+
+	f, err := os.CreateTemp("", "server-config-*.json")
+	assert.NoError(t, err)
+	defer os.Remove(f.Name())
+
+	_, err = f.WriteString(cfgJSON)
+	assert.NoError(t, err)
+	assert.NoError(t, f.Close())
+
+	// ENV-слой — должен перекрыть файл, но быть слабее флагов
+	t.Setenv("CONFIG", "") // путь до файла зададим флагом
+	t.Setenv("ADDRESS", "from-env:2")
+	t.Setenv("STORE_INTERVAL", "20") // секунды
+	t.Setenv("RESTORE", "true")      // перекрывает false из файла
+	t.Setenv("FILE_STORAGE_PATH", "/tmp/from-env-db.json")
+	t.Setenv("DATABASE_DSN", "postgres://env@localhost:5432/db")
+	t.Setenv("CRYPTO_KEY", "/tmp/env-key.pem")
+
+	// os.Args: и файл, и флаги
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{
+		"server.test",
+		"-config", f.Name(), // путь до файла
+		"-a", "from-flag:3", // флаг перекрывает env ADDRESS
+		"-i", "30", // флаг перекрывает env STORE_INTERVAL=20
+		// -f не задаём → FILE_STORAGE_PATH берётся из env
+	}
+
+	// Сброс FlagSet
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	parseFlags()
+
+	// Проверяем приоритеты
+
+	// address: file ("from-file:1") < env ("from-env:2") < flag ("from-flag:3")
+	assert.Equal(t, "from-flag:3", flagRunAddr)
+
+	// store_interval: file ("1s" → 1) < env (20) < flag (30)
+	assert.Equal(t, int64(30), flagStoreInterval)
+
+	// FILE_STORAGE_PATH: file ("/tmp/from-file-db.json") < env ("/tmp/from-env-db.json"), флага нет
+	assert.Equal(t, "/tmp/from-env-db.json", flagFileStoragePath)
+
+	// RESTORE: file (false) < env (true), флага нет
+	assert.True(t, flagRestore)
+
+	// DATABASE_DSN: file < env, флага нет
+	assert.Equal(t, "postgres://env@localhost:5432/db", flagDatabaseDSN)
+
+	// CRYPTO_KEY: file < env, флага нет
+	assert.Equal(t, "/tmp/env-key.pem", flagCryptoKey)
+}

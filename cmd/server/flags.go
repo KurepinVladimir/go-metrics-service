@@ -1,14 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v6"
 )
 
-// неэкспортированная переменная flagRunAddr содержит адрес и порт для запуска сервера
+// глобальные переменные, которые использует main.go
 var flagRunAddr string
 var flagStoreInterval int64
 var flagFileStoragePath string
@@ -17,7 +21,9 @@ var flagDatabaseDSN string
 var flagKey string
 var flagAuditFile string
 var flagAuditURL string
+var flagCryptoKey string
 
+// Config — слой переменных окружения
 type Config struct {
 	RunAddr         string `env:"ADDRESS"`
 	StoreInterval   int64  `env:"STORE_INTERVAL"`
@@ -27,68 +33,190 @@ type Config struct {
 	Key             string `env:"KEY"`
 	AuditFile       string `env:"AUDIT_FILE"`
 	AuditURL        string `env:"AUDIT_URL"`
+	CryptoKey       string `env:"CRYPTO_KEY"`
+	ConfigPath      string `env:"CONFIG"` // путь к JSON-конфигу
 }
 
-// parseFlags обрабатывает аргументы командной строки
-func parseFlags() {
-	// регистрируем переменную flagRunAddr как аргумент -a со значением :8080 по умолчанию
-	flag.StringVar(&flagRunAddr, "a", ":8080", "address and port to run server")
-	flag.Int64Var(&flagStoreInterval, "i", 300, "storage interval in seconds")
-	flag.StringVar(&flagFileStoragePath, "f", "/tmp/metrics-db.json", "file storage path")
-	flag.BoolVar(&flagRestore, "r", false, "restore from file storage")
-	flag.StringVar(&flagDatabaseDSN, "d", "", "database DSN for persistent storage") // postgres://admin:admin@localhost:5432/videos
-	flag.StringVar(&flagKey, "k", "", "Key")
-	flag.StringVar(&flagAuditFile, "audit-file", "", "path to audit log file")
-	flag.StringVar(&flagAuditURL, "audit-url", "", "URL of remote audit log server")
+// FileConfig — слой JSON-файла
+//
+//	{
+//	  "address": "localhost:8080",
+//	  "restore": true,
+//	  "store_interval": "1s",
+//	  "store_file": "/path/to/file.db",
+//	  "database_dsn": "",
+//	  "crypto_key": "/path/to/key.pem"
+//	}
+type FileConfig struct {
+	Address       string `json:"address"`
+	Restore       *bool  `json:"restore"`
+	StoreInterval string `json:"store_interval"`
+	StoreFile     string `json:"store_file"`
+	DatabaseDSN   string `json:"database_dsn"`
+	CryptoKey     string `json:"crypto_key"`
+}
 
-	// парсим переданные серверу аргументы в зарегистрированные переменные
+// parseFlags обрабатывает аргументы командной строки и JSON/ENV конфиг
+// Приоритет: значения из файла < переменные окружения < флаги
+func parseFlags() {
+	// ----- 1. Базовые дефолты -----
+	defaultRunAddr := ":8080"
+	defaultStoreInterval := int64(300) // секунды
+	defaultFileStoragePath := "/tmp/metrics-db.json"
+	defaultRestore := false
+
+	// промежуточные "текущие" значения, поверх них будем накладывать слои
+	runAddr := defaultRunAddr
+	storeInterval := defaultStoreInterval
+	fileStoragePath := defaultFileStoragePath
+	restore := defaultRestore
+	databaseDSN := ""
+	key := ""
+	auditFile := ""
+	auditURL := ""
+	cryptoKey := ""
+
+	// ----- 2. Читаем CONFIG из env -----
+	var envCfg Config
+	_ = env.Parse(&envCfg) // пока важен только envCfg.ConfigPath и компания
+
+	configPath := envCfg.ConfigPath
+
+	// ----- 3. Смотрим -c / -config в os.Args ДО flag.Parse (флаги имеют больший приоритет для пути) -----
+	if pathFromArgs := findConfigPathInArgs(os.Args[1:]); pathFromArgs != "" {
+		configPath = pathFromArgs
+	}
+
+	// ----- 4. Если указали JSON-файл — читаем и накладываем слой "file" -----
+	if configPath != "" {
+		if fileCfg, err := readFileConfig(configPath); err == nil {
+			// address
+			if fileCfg.Address != "" {
+				runAddr = fileCfg.Address
+			}
+			// store_interval: строка "1s" → секунды
+			if fileCfg.StoreInterval != "" {
+				if secs := parseDurationToSeconds(fileCfg.StoreInterval); secs > 0 {
+					storeInterval = secs
+				}
+			}
+			// store_file → FILE_STORAGE_PATH
+			if fileCfg.StoreFile != "" {
+				fileStoragePath = fileCfg.StoreFile
+			}
+			// restore
+			if fileCfg.Restore != nil {
+				restore = *fileCfg.Restore
+			}
+			// database_dsn
+			if fileCfg.DatabaseDSN != "" {
+				databaseDSN = fileCfg.DatabaseDSN
+			}
+			// crypto_key
+			if fileCfg.CryptoKey != "" {
+				cryptoKey = fileCfg.CryptoKey
+			}
+		} else {
+			log.Printf("cannot read config file %s: %v", configPath, err)
+		}
+	}
+
+	// ----- 5. Накладываем слой "env" поверх файла -----
+	// envCfg уже заполнен через env.Parse(&envCfg)
+
+	if envCfg.RunAddr != "" {
+		runAddr = envCfg.RunAddr
+	}
+	if v, ok := os.LookupEnv("STORE_INTERVAL"); ok && v != "" {
+		// тут STORE_INTERVAL — в секундах (int64)
+		storeInterval = envCfg.StoreInterval
+	}
+	if envCfg.FileStoragePath != "" {
+		fileStoragePath = envCfg.FileStoragePath
+	}
+	if _, ok := os.LookupEnv("RESTORE"); ok {
+		restore = envCfg.Restore
+	}
+	if envCfg.DatabaseDSN != "" {
+		databaseDSN = envCfg.DatabaseDSN
+	}
+	if envCfg.Key != "" {
+		key = envCfg.Key
+	}
+	if envCfg.AuditFile != "" {
+		auditFile = envCfg.AuditFile
+	}
+	if envCfg.AuditURL != "" {
+		auditURL = envCfg.AuditURL
+	}
+	if envCfg.CryptoKey != "" {
+		cryptoKey = envCfg.CryptoKey
+	}
+
+	// ----- 6. Регистрируем флаги с дефолтами из (file+env) -----
+	flag.StringVar(&flagRunAddr, "a", runAddr, "address and port to run server")
+	flag.Int64Var(&flagStoreInterval, "i", storeInterval, "storage interval in seconds")
+	flag.StringVar(&flagFileStoragePath, "f", fileStoragePath, "file storage path")
+	flag.BoolVar(&flagRestore, "r", restore, "restore from file storage")
+	flag.StringVar(&flagDatabaseDSN, "d", databaseDSN, "database DSN for persistent storage")
+	flag.StringVar(&flagKey, "k", key, "Key")
+	flag.StringVar(&flagAuditFile, "audit-file", auditFile, "path to audit log file")
+	flag.StringVar(&flagAuditURL, "audit-url", auditURL, "URL of remote audit log server")
+	flag.StringVar(&flagCryptoKey, "crypto-key", cryptoKey, "path to RSA private key file")
+
+	// чтобы -c/-config отображались в help, но реальное значение мы уже обработали выше
+	var configDummy string
+	flag.StringVar(&configDummy, "config", configPath, "path to JSON config file")
+	flag.StringVar(&configDummy, "c", configPath, "path to JSON config file (shorthand)")
+
+	// ----- 7. Парсим флаги (флаги — самый высокий приоритет) -----
 	flag.Parse()
 
-	// проверка на неизвестные аргументы
+	// ----- 8. Проверка на неизвестные аргументы -----
 	if len(flag.Args()) > 0 {
 		log.Fatalf("Неизвестные аргументы: %v", flag.Args())
 	}
+}
 
-	// читаем переменные окружения и заполняем структуру Config
-	// если переменные окружения не заданы, то будут использованы значения по умолчанию
-	var cfg Config
-	err := env.Parse(&cfg)
+// findConfigPathInArgs ищет -c / -config в сыром os.Args (до flag.Parse)
+func findConfigPathInArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-c" || arg == "-config":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		case strings.HasPrefix(arg, "-c="):
+			return strings.TrimPrefix(arg, "-c=")
+		case strings.HasPrefix(arg, "-config="):
+			return strings.TrimPrefix(arg, "-config=")
+		}
+	}
+	return ""
+}
+
+// readFileConfig читает JSON-конфиг сервера
+func readFileConfig(path string) (FileConfig, error) {
+	var cfg FileConfig
+	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatalf("Ошибка парсинга переменных окружения: %v", err)
+		return cfg, fmt.Errorf("read config file %q: %w", path, err)
 	}
-
-	if cfg.RunAddr != "" {
-		flagRunAddr = cfg.RunAddr
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("unmarshal config file %q: %w", path, err)
 	}
+	return cfg, nil
+}
 
-	// Устанавливаем значение только если переменная окружения была явно задана
-	if _, ok := os.LookupEnv("STORE_INTERVAL"); ok {
-		flagStoreInterval = cfg.StoreInterval
+// parseDurationToSeconds парсит "1s", "5m", "2h" → секунды
+func parseDurationToSeconds(s string) int64 {
+	if s == "" {
+		return 0
 	}
-
-	if cfg.FileStoragePath != "" {
-		flagFileStoragePath = cfg.FileStoragePath
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0
 	}
-
-	// Устанавливаем значение только если переменная окружения была явно задана
-	if _, ok := os.LookupEnv("RESTORE"); ok {
-		flagRestore = cfg.Restore
-	}
-
-	if cfg.DatabaseDSN != "" {
-		flagDatabaseDSN = cfg.DatabaseDSN
-	}
-
-	if envKey := cfg.Key; envKey != "" {
-		flagKey = envKey
-	}
-
-	if cfg.AuditFile != "" {
-		flagAuditFile = cfg.AuditFile
-	}
-
-	if cfg.AuditURL != "" {
-		flagAuditURL = cfg.AuditURL
-	}
-
+	return int64(d.Seconds())
 }
