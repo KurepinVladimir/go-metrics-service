@@ -12,9 +12,11 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
-	github.com/swaggo/swag v1.16.6
-	go.uber.org/zap v1.27.0
-	golang.org/x/tools v0.37.0
+github.com/swaggo/swag v1.16.6
+go.uber.org/zap v1.27.0
+golang.org/x/tools v0.37.0
+google.golang.org/grpc v1.68.0
+google.golang.org/protobuf v1.34.2
 )
 
 require (

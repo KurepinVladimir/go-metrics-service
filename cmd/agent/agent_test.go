@@ -36,6 +36,7 @@ func TestSendMetricJSON(t *testing.T) {
 		// Проверка заголовков запроса
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "gzip", r.Header.Get("Content-Encoding")) // обязательно: ожидаем gzip
+		assert.Equal(t, "203.0.113.10", r.Header.Get("X-Real-IP"))
 
 		// Создаём gzip-ридер для чтения сжатого тела
 		gr, err := gzip.NewReader(r.Body)
@@ -92,6 +93,7 @@ func TestSendMetricJSON(t *testing.T) {
 	agent := &Agent{
 		Client:    client,
 		ServerURL: ts.URL,
+		RealIP:    "203.0.113.10",
 	}
 	err := agent.sendMetricJSON(expectedMetric)
 

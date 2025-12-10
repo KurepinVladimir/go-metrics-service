@@ -19,6 +19,7 @@ var (
 	flagKey            string
 	flagRateLimit      int
 	flagCryptoKey      string
+	flagGRPCAddr       string
 )
 
 // agentConfig — "склейка" конфигурации из файла + env.
@@ -36,6 +37,7 @@ type agentConfig struct {
 	Key            string `mapstructure:"key"`
 	RateLimit      int    `mapstructure:"rate_limit"`
 	CryptoKey      string `mapstructure:"crypto_key"`
+	GRPCAddress    string `mapstructure:"grpc_address"`
 }
 
 // parseFlags обрабатывает конфигурацию агента.
@@ -98,6 +100,9 @@ func parseFlags() error {
 	// Путь к публичному RSA-ключу
 	flag.StringVar(&flagCryptoKey, "crypto-key", cfg.CryptoKey, "path to RSA public key file")
 
+	// Адрес gRPC-сервера
+	flag.StringVar(&flagGRPCAddr, "g", cfg.GRPCAddress, "gRPC server address (GRPC_ADDRESS)")
+
 	// Чтобы -config / -c были в help, но значение мы уже учитываем выше
 	var configDummy string
 	flag.StringVar(&configDummy, "config", configPath, "path to JSON config file")
@@ -144,6 +149,7 @@ func loadAgentConfigWithViper(configPath string) (agentConfig, error) {
 	v.SetDefault("rate_limit", 1)
 	v.SetDefault("key", "")
 	v.SetDefault("crypto_key", "")
+	v.SetDefault("grpc_address", "")
 
 	// ----- ENV -----
 	// Преобразуем ключи вида "report_interval" → "REPORT_INTERVAL"
