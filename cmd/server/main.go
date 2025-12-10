@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -265,6 +266,15 @@ func run() error {
 		rsaPrivateKey = key
 	}
 
+	var trustedNet *net.IPNet
+	if flagTrustedSubnet != "" {
+		_, network, err := net.ParseCIDR(flagTrustedSubnet)
+		if err != nil {
+			return fmt.Errorf("invalid trusted_subnet %q: %w", flagTrustedSubnet, err)
+		}
+		trustedNet = network
+	}
+
 	if err := logger.Initialize("INFO"); err != nil {
 		return err
 	}
@@ -320,6 +330,7 @@ func run() error {
 	// middleware для подписи и расшифровки
 	hashMiddleware := middleware.ValidateHashSHA256(flagKey)
 	decryptMiddleware := middleware.DecryptRSA(rsaPrivateKey)
+	trustedSubnetMiddleware := middleware.ValidateTrustedSubnet(trustedNet)
 
 	// --- "текстовые" ручки без шифрования/HMAC ---
 	r.Post("/update/{type}/{name}/{value}", updateHandler(storage, aud)) // Регистрируем маршрут с параметрами
@@ -331,6 +342,8 @@ func run() error {
 
 	// --- JSON-эндпоинты, куда стучится агент: RSA → gzip-распаковка → проверка HMAC ---
 	r.Group(func(r chi.Router) {
+		// 0) проверяем, что агентский IP входит в доверенную подсеть
+		r.Use(trustedSubnetMiddleware)
 		// 1) сначала расшифровываем тело (если есть приватный ключ)
 		r.Use(decryptMiddleware)
 		// 2) потом, если Content-Encoding: gzip, распаковываем

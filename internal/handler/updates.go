@@ -63,6 +63,25 @@ func UpdatesHandler(storage repository.Storage, key string, aud *audit.Auditor) 
 			return
 		}
 
+		// Предварительно валидируем batch: проверяем наличие обязательных полей
+		for _, m := range batch {
+			switch m.MType {
+			case "gauge":
+				if m.Value == nil {
+					http.Error(w, "gauge without value", http.StatusBadRequest)
+					return
+				}
+			case "counter":
+				if m.Delta == nil {
+					http.Error(w, "counter without delta", http.StatusBadRequest)
+					return
+				}
+			default:
+				http.Error(w, "unknown mtype", http.StatusBadRequest)
+				return
+			}
+		}
+
 		// Если хранилище умеет атомарный батч — используем его
 		if bu, ok := storage.(repository.BatchUpdater); ok {
 			if err := bu.UpdateBatch(r.Context(), batch); err != nil {
