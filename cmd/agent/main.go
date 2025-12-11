@@ -22,9 +22,12 @@ import (
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/cryptohelpers"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/models"
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/proto"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/retry"
 	"github.com/go-resty/resty/v2"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var httpDelays = []time.Duration{time.Second, 3 * time.Second, 5 * time.Second}
@@ -46,7 +49,7 @@ func NewAgent(serverURL string) *Agent {
 		Metrics:   make(map[string]float64), // инициализируем хранилище метрик
 		Client:    resty.New(),              // Создаём HTTP-клиент resty
 		ServerURL: serverURL,                // Адрес сервера, куда будем отправлять метрики
-		RealIP:    detectAgentIP(),
+		RealIP:    detectAgentIP(),          // Пытаемся определить реальный IP-адрес агента
 	}
 }
 
@@ -229,6 +232,19 @@ func main() {
 
 	agent := NewAgent(flagRunAddr)
 
+	// gRPC-клиент, если указан адрес
+	var grpcConn *grpc.ClientConn
+	var grpcClient proto.MetricsClient
+	if flagGRPCAddr != "" {
+		conn, err := grpc.Dial(flagGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Fatalf("failed to connect to gRPC server %s: %v", flagGRPCAddr, err)
+		}
+		grpcConn = conn
+		grpcClient = proto.NewMetricsClient(conn)
+		defer grpcConn.Close()
+	}
+
 	// Канал заданий на отправку
 	jobs := make(chan models.Metrics, 2048)
 
@@ -292,7 +308,12 @@ func main() {
 	}()
 
 	// Пул воркеров ограничивает число одновременных исходящих запросов
-	wg := startWorkers(ctx, flagRateLimit, jobs, agent)
+	var wg *sync.WaitGroup
+	if grpcClient != nil {
+		wg = startGRPCDispatcher(ctx, reportInterval, jobs, grpcClient, agent.realIP())
+	} else {
+		wg = startWorkers(ctx, flagRateLimit, jobs, agent)
+	}
 
 	// ---- graceful shutdown ----
 	<-ctx.Done()
