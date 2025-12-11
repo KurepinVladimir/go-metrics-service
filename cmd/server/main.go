@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,8 +23,10 @@ import (
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/logger"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/middleware"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/models"
+	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/proto"
 	"github.com/KurepinVladimir/go-musthave-metrics-tpl.git/internal/repository"
 	"github.com/go-chi/chi/v5"
+	"google.golang.org/grpc"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"go.uber.org/zap"
@@ -265,6 +268,15 @@ func run() error {
 		rsaPrivateKey = key
 	}
 
+	var trustedNet *net.IPNet
+	if flagTrustedSubnet != "" {
+		_, network, err := net.ParseCIDR(flagTrustedSubnet)
+		if err != nil {
+			return fmt.Errorf("invalid trusted_subnet %q: %w", flagTrustedSubnet, err)
+		}
+		trustedNet = network
+	}
+
 	if err := logger.Initialize("INFO"); err != nil {
 		return err
 	}
@@ -320,6 +332,7 @@ func run() error {
 	// middleware для подписи и расшифровки
 	hashMiddleware := middleware.ValidateHashSHA256(flagKey)
 	decryptMiddleware := middleware.DecryptRSA(rsaPrivateKey)
+	trustedSubnetMiddleware := middleware.ValidateTrustedSubnet(trustedNet)
 
 	// --- "текстовые" ручки без шифрования/HMAC ---
 	r.Post("/update/{type}/{name}/{value}", updateHandler(storage, aud)) // Регистрируем маршрут с параметрами
@@ -331,6 +344,8 @@ func run() error {
 
 	// --- JSON-эндпоинты, куда стучится агент: RSA → gzip-распаковка → проверка HMAC ---
 	r.Group(func(r chi.Router) {
+		// 0) проверяем, что агентский IP входит в доверенную подсеть
+		r.Use(trustedSubnetMiddleware)
 		// 1) сначала расшифровываем тело (если есть приватный ключ)
 		r.Use(decryptMiddleware)
 		// 2) потом, если Content-Encoding: gzip, распаковываем
@@ -353,6 +368,25 @@ func run() error {
 	srv := &http.Server{
 		Addr:    flagRunAddr,
 		Handler: r,
+	}
+
+	var grpcSrv *grpc.Server
+	var grpcErrCh chan error
+	if flagGRPCAddr != "" {
+		lis, err := net.Listen("tcp", flagGRPCAddr)
+		if err != nil {
+			return fmt.Errorf("failed to listen gRPC on %s: %w", flagGRPCAddr, err)
+		}
+		grpcSrv = grpc.NewServer(grpc.UnaryInterceptor(middleware.TrustedSubnetUnaryInterceptor(trustedNet)))
+		proto.RegisterMetricsServer(grpcSrv, &handler.GRPCMetricsServer{Storage: storage, Auditor: aud})
+		grpcErrCh = make(chan error, 1)
+		go func() {
+			logger.Log.Info("Running gRPC server", zap.String("address", flagGRPCAddr))
+			if err := grpcSrv.Serve(lis); err != nil {
+				grpcErrCh <- err
+			}
+			close(grpcErrCh)
+		}()
 	}
 
 	// Канал для ошибок сервера
@@ -383,6 +417,9 @@ func run() error {
 			logger.Log.Error("HTTP server shutdown error", zap.Error(err))
 			return err
 		}
+		if grpcSrv != nil {
+			grpcSrv.GracefulStop()
+		}
 
 		// Финально сохраняем метрики, если работаем с MemStorage и настроен файл
 		if memStorage, ok := storage.(*repository.MemStorage); ok && flagFileStoragePath != "" {
@@ -402,6 +439,12 @@ func run() error {
 
 	case err := <-errCh:
 		// Сервер упал сам по себе, не через Shutdown
+		if err != nil {
+			return err
+		}
+		return nil
+
+	case err := <-grpcErrCh:
 		if err != nil {
 			return err
 		}

@@ -22,6 +22,8 @@ var flagKey string
 var flagAuditFile string
 var flagAuditURL string
 var flagCryptoKey string
+var flagTrustedSubnet string
+var flagGRPCAddr string
 
 // Config — слой переменных окружения
 type Config struct {
@@ -35,6 +37,8 @@ type Config struct {
 	AuditURL        string `env:"AUDIT_URL"`
 	CryptoKey       string `env:"CRYPTO_KEY"`
 	ConfigPath      string `env:"CONFIG"` // путь к JSON-конфигу
+	TrustedSubnet   string `env:"TRUSTED_SUBNET"`
+	GRPCAddr        string `env:"GRPC_ADDRESS"`
 }
 
 // FileConfig — слой JSON-файла
@@ -45,7 +49,9 @@ type Config struct {
 //	  "store_interval": "1s",
 //	  "store_file": "/path/to/file.db",
 //	  "database_dsn": "",
-//	  "crypto_key": "/path/to/key.pem"
+//	  "crypto_key": "/path/to/key.pem",
+//	  "trusted_subnet": "192.168.0.0/24"я
+//	  "grpc_address": "localhost:50051"
 //	}
 type FileConfig struct {
 	Address       string `json:"address"`
@@ -54,6 +60,8 @@ type FileConfig struct {
 	StoreFile     string `json:"store_file"`
 	DatabaseDSN   string `json:"database_dsn"`
 	CryptoKey     string `json:"crypto_key"`
+	TrustedSubnet string `json:"trusted_subnet"`
+	GRPCAddr      string `json:"grpc_address"`
 }
 
 // parseFlags обрабатывает аргументы командной строки и JSON/ENV конфиг
@@ -75,6 +83,8 @@ func parseFlags() {
 	auditFile := ""
 	auditURL := ""
 	cryptoKey := ""
+	trustedSubnet := ""
+	grpcAddr := ""
 
 	// ----- 2. Читаем CONFIG из env -----
 	var envCfg Config
@@ -116,6 +126,12 @@ func parseFlags() {
 			if fileCfg.CryptoKey != "" {
 				cryptoKey = fileCfg.CryptoKey
 			}
+			if fileCfg.TrustedSubnet != "" {
+				trustedSubnet = fileCfg.TrustedSubnet
+			}
+			if fileCfg.GRPCAddr != "" {
+				grpcAddr = fileCfg.GRPCAddr
+			}
 		} else {
 			log.Printf("cannot read config file %s: %v", configPath, err)
 		}
@@ -152,6 +168,12 @@ func parseFlags() {
 	if envCfg.CryptoKey != "" {
 		cryptoKey = envCfg.CryptoKey
 	}
+	if envCfg.TrustedSubnet != "" {
+		trustedSubnet = envCfg.TrustedSubnet
+	}
+	if envCfg.GRPCAddr != "" {
+		grpcAddr = envCfg.GRPCAddr
+	}
 
 	// ----- 6. Регистрируем флаги с дефолтами из (file+env) -----
 	flag.StringVar(&flagRunAddr, "a", runAddr, "address and port to run server")
@@ -163,6 +185,8 @@ func parseFlags() {
 	flag.StringVar(&flagAuditFile, "audit-file", auditFile, "path to audit log file")
 	flag.StringVar(&flagAuditURL, "audit-url", auditURL, "URL of remote audit log server")
 	flag.StringVar(&flagCryptoKey, "crypto-key", cryptoKey, "path to RSA private key file")
+	flag.StringVar(&flagTrustedSubnet, "t", trustedSubnet, "trusted subnet in CIDR (TRUSTED_SUBNET)")
+	flag.StringVar(&flagGRPCAddr, "grpc", grpcAddr, "gRPC listen address (e.g. localhost:3200)")
 
 	// чтобы -c/-config отображались в help, но реальное значение мы уже обработали выше
 	var configDummy string
