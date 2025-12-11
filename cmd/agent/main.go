@@ -236,7 +236,7 @@ func main() {
 	var grpcConn *grpc.ClientConn
 	var grpcClient proto.MetricsClient
 	if flagGRPCAddr != "" {
-		conn, err := grpc.Dial(flagGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(flagGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Fatalf("failed to connect to gRPC server %s: %v", flagGRPCAddr, err)
 		}
